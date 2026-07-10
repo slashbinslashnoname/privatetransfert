@@ -1,0 +1,24 @@
+{
+  "name": "private-transfert",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "bun run server/static.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vite": "^8.1.4",
+    "vite-plugin-node-polyfills": "^0.28.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "client-zip": "^2.5.0",
+    "fflate": "^0.8.3",
+    "webtorrent": "^3.0.16"
+  }
+}
