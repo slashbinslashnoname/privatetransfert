@@ -247,9 +247,12 @@ function badgeHtml(transfer: Transfer, label: string): string {
 
 function statsHtml(transfer: Transfer): string {
   const torrent = transfer.torrent
+  if (transfer.direction === 'download' && torrent.done) {
+    return '<span>✓ Ready — use Save below to keep the file</span>'
+  }
   if (torrent.numPeers === 0) {
     if (transfer.direction === 'seed') return '<span>Ready to share</span>'
-    if (!torrent.done) return '<span>Waiting for peers…</span>'
+    return '<span>Waiting for peers…</span>'
   }
   if (transfer.direction === 'seed' && torrent.numPeers > 0 && torrent.wires.every((w) => w.isSeeder)) {
     return '<span>✓ All peers have the full file</span>'
@@ -327,9 +330,13 @@ function updateCard(root: HTMLElement, transfer: Transfer, ring: TransferRing, c
   pauseBtn.innerHTML = torrent.paused ? ICON_PLAY : ICON_PAUSE
   pauseBtn.title = torrent.paused ? 'Resume' : 'Pause'
 
+  // WebTorrent keeps pieces in browser memory — the OS Downloads folder is only
+  // written when the user clicks Save. Surface that path as soon as the torrent is done.
   if (transfer.direction === 'download' && torrent.done && !controller.filesRendered) {
     controller.filesRendered = true
     const container = root.querySelector<HTMLDivElement>('.save-files')!
+    showToast('Download complete — save your file(s) below')
+    root.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     if (transfer.crypto) {
       void renderEncryptedFiles(container, transfer, transfer.crypto, root)
     } else {
@@ -344,40 +351,72 @@ function unzipAsync(data: Uint8Array): Promise<Record<string, Uint8Array>> {
   })
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function saveHeading(count: number): string {
+  return count === 1 ? 'Your file is ready' : `Your ${count} files are ready`
+}
+
 async function renderEncryptedFiles(container: HTMLElement, transfer: Transfer, shareKey: ShareKey, cardRoot: HTMLElement) {
-  container.innerHTML = `<p class="decrypt-status">Decrypting…</p>`
+  container.innerHTML = `
+    <div class="save-panel">
+      <p class="save-heading">Decrypting…</p>
+      <p class="decrypt-status">Unpacking the encrypted share so you can save it.</p>
+    </div>
+  `
   try {
     const encryptedFile = transfer.torrent.files[0]
     if (!encryptedFile) throw new Error('no encrypted payload in this torrent')
     const encryptedBlob = await encryptedFile.blob()
     const archiveBlob = await decryptBlob(encryptedBlob, shareKey)
     const entries = await unzipAsync(new Uint8Array(await archiveBlob.arrayBuffer()))
-    const names = Object.keys(entries)
+    // Skip directory-only zip entries (trailing slash / empty payload).
+    const names = Object.keys(entries).filter((name) => {
+      const data = entries[name]
+      return Boolean(data) && !name.endsWith('/')
+    })
+
+    if (names.length === 0) {
+      container.innerHTML = `<p class="decrypt-status error">This share decrypted, but no files were found inside.</p>`
+      return
+    }
 
     transfer.displayName = names.length === 1 ? names[0] : `${names.length} files`
     cardRoot.querySelector('.t-name')!.textContent = displayTitle(transfer)
 
-    container.innerHTML = ''
-
-    if (names.length <= 1) {
-      const name = names[0] ?? 'file'
-      const data = entries[name]
-      if (!data) return
-      const a = document.createElement('a')
-      a.className = 'save-btn'
-      a.href = URL.createObjectURL(new Blob([new Uint8Array(data)]))
-      a.download = name
-      a.textContent = `Save “${name}”`
-      container.appendChild(a)
+    if (names.length === 1) {
+      const name = names[0]!
+      const data = entries[name]!
+      container.innerHTML = `
+        <div class="save-panel">
+          <p class="save-heading">${saveHeading(1)}</p>
+          <p class="save-sub" title="${escapeHtml(name)}">${escapeHtml(name)} · ${formatBytes(data.length)}</p>
+          <button class="save-btn" type="button" data-action="save-one">${ICON_DOWNLOAD}<span>Save “${escapeHtml(name)}”</span></button>
+        </div>
+      `
+      container.querySelector('[data-action="save-one"]')!.addEventListener('click', () => {
+        saveBlob(new Blob([new Uint8Array(data)]), name)
+        showToast(`Saving “${name}”…`)
+      })
       return
     }
 
+    const zipName = `${(transfer.torrent.name || 'download').replace(/\.bin$/i, '') || 'download'}.zip`
     container.innerHTML = `
-      <div class="save-row">
-        <button class="save-btn" type="button" data-action="download-all">Download All (${names.length} files)</button>
-        <button class="link-btn" type="button" data-action="toggle-files">See files</button>
+      <div class="save-panel">
+        <p class="save-heading">${saveHeading(names.length)}</p>
+        <div class="save-row">
+          <button class="save-btn" type="button" data-action="download-all">${ICON_DOWNLOAD}<span>Download all (${names.length})</span></button>
+          <button class="link-btn" type="button" data-action="toggle-files">See files</button>
+        </div>
+        <ul class="file-list" hidden></ul>
       </div>
-      <ul class="file-list" hidden></ul>
     `
 
     const list = container.querySelector<HTMLUListElement>('.file-list')!
@@ -385,7 +424,7 @@ async function renderEncryptedFiles(container: HTMLElement, transfer: Transfer, 
       .map(
         (name, i) => `
           <li>
-            <span class="file-name" title="${name}">${name}</span>
+            <span class="file-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
             <span class="file-size">${formatBytes(entries[name]?.length ?? 0)}</span>
             <button class="icon-btn small" type="button" data-file-index="${i}" title="Save this file">${ICON_DOWNLOAD}</button>
           </li>`,
@@ -396,7 +435,10 @@ async function renderEncryptedFiles(container: HTMLElement, transfer: Transfer, 
       btn.addEventListener('click', () => {
         const name = names[Number(btn.dataset.fileIndex)]
         const data = name ? entries[name] : undefined
-        if (name && data) saveBlob(new Blob([new Uint8Array(data)]), name)
+        if (name && data) {
+          saveBlob(new Blob([new Uint8Array(data)]), name)
+          showToast(`Saving “${name}”…`)
+        }
       })
     })
 
@@ -407,49 +449,82 @@ async function renderEncryptedFiles(container: HTMLElement, transfer: Transfer, 
     })
 
     container.querySelector('[data-action="download-all"]')!.addEventListener('click', () => {
-      saveBlob(archiveBlob, `${transfer.displayName || 'download'}.zip`)
+      saveBlob(archiveBlob, zipName)
+      showToast('Saving zip…')
     })
   } catch (err) {
     console.error('[decrypt]', err)
-    container.innerHTML = `<p class="decrypt-status">Couldn’t decrypt this transfer — the key may be wrong.</p>`
+    container.innerHTML = `<p class="decrypt-status error">Couldn’t decrypt this transfer — the key may be wrong.</p>`
   }
 }
 
+/** Triggers a browser file download. Must stay in a user-gesture stack when possible. */
 function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  a.rel = 'noopener'
+  a.style.display = 'none'
+  // Safari / some WebKit builds ignore click() on detached anchors.
+  document.body.appendChild(a)
   a.click()
+  a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+async function saveTorrentFile(file: { name: string; blob(): Promise<Blob> }, btn?: HTMLButtonElement) {
+  const original = btn?.innerHTML
+  if (btn) {
+    btn.disabled = true
+    btn.innerHTML = `<span>Saving…</span>`
+  }
+  try {
+    const blob = await file.blob()
+    saveBlob(blob, file.name)
+    showToast(`Saving “${file.name}”…`)
+  } catch (err) {
+    console.error('[file]', file.name, err)
+    showToast(`Couldn’t save “${file.name}”`)
+  } finally {
+    if (btn && original !== undefined) {
+      btn.disabled = false
+      btn.innerHTML = original
+    }
+  }
 }
 
 function renderCompletedFiles(container: HTMLElement, transfer: Transfer) {
   const files = transfer.torrent.files
 
-  if (files.length <= 1) {
-    const file = files[0]
-    if (!file) return
-    file
-      .blob()
-      .then((blob) => {
-        const a = document.createElement('a')
-        a.className = 'save-btn'
-        a.href = URL.createObjectURL(blob)
-        a.download = file.name
-        a.textContent = `Save “${file.name}”`
-        container.appendChild(a)
-      })
-      .catch((err) => console.error('[file]', file.name, err))
+  if (files.length === 0) {
+    container.innerHTML = `<p class="decrypt-status error">Transfer finished, but no files were found. Try the share link again.</p>`
+    return
+  }
+
+  if (files.length === 1) {
+    const file = files[0]!
+    container.innerHTML = `
+      <div class="save-panel">
+        <p class="save-heading">${saveHeading(1)}</p>
+        <p class="save-sub" title="${escapeHtml(file.path || file.name)}">${escapeHtml(file.name)} · ${formatBytes(file.length)}</p>
+        <button class="save-btn" type="button" data-action="save-one">${ICON_DOWNLOAD}<span>Save “${escapeHtml(file.name)}”</span></button>
+      </div>
+    `
+    const btn = container.querySelector<HTMLButtonElement>('[data-action="save-one"]')!
+    btn.addEventListener('click', () => void saveTorrentFile(file, btn))
     return
   }
 
   container.innerHTML = `
-    <div class="save-row">
-      <button class="save-btn" type="button" data-action="download-all">Download All (${files.length} files)</button>
-      <button class="link-btn" type="button" data-action="toggle-files">See files</button>
+    <div class="save-panel">
+      <p class="save-heading">${saveHeading(files.length)}</p>
+      <div class="save-row">
+        <button class="save-btn" type="button" data-action="download-all">${ICON_DOWNLOAD}<span>Download all (${files.length})</span></button>
+        <button class="link-btn" type="button" data-action="toggle-files">See files</button>
+      </div>
+      <ul class="file-list" hidden></ul>
     </div>
-    <ul class="file-list" hidden></ul>
   `
 
   const list = container.querySelector<HTMLUListElement>('.file-list')!
@@ -457,7 +532,7 @@ function renderCompletedFiles(container: HTMLElement, transfer: Transfer) {
     .map(
       (file, i) => `
         <li>
-          <span class="file-name" title="${file.path}">${file.path}</span>
+          <span class="file-name" title="${escapeHtml(file.path)}">${escapeHtml(file.path)}</span>
           <span class="file-size">${formatBytes(file.length)}</span>
           <button class="icon-btn small" type="button" data-file-index="${i}" title="Save this file">${ICON_DOWNLOAD}</button>
         </li>`,
@@ -468,14 +543,7 @@ function renderCompletedFiles(container: HTMLElement, transfer: Transfer) {
     btn.addEventListener('click', () => {
       const file = files[Number(btn.dataset.fileIndex)]
       if (!file) return
-      btn.disabled = true
-      file
-        .blob()
-        .then((blob) => saveBlob(blob, file.name))
-        .catch((err) => console.error('[file]', file.name, err))
-        .finally(() => {
-          btn.disabled = false
-        })
+      void saveTorrentFile(file, btn)
     })
   })
 
@@ -485,21 +553,26 @@ function renderCompletedFiles(container: HTMLElement, transfer: Transfer) {
     toggleBtn.textContent = list.hidden ? 'See files' : 'Hide files'
   })
 
+  // Multi-file lists default expanded so the user immediately sees what's available.
+  list.hidden = false
+  toggleBtn.textContent = 'Hide files'
+
   const downloadAllBtn = container.querySelector<HTMLButtonElement>('[data-action="download-all"]')!
   downloadAllBtn.addEventListener('click', async () => {
     downloadAllBtn.disabled = true
-    const originalText = downloadAllBtn.textContent
-    downloadAllBtn.textContent = 'Zipping…'
+    const originalHtml = downloadAllBtn.innerHTML
+    downloadAllBtn.innerHTML = `<span>Zipping…</span>`
     try {
       const zip = downloadZip(files.map((file) => ({ input: file.stream(), name: file.path, size: file.length })))
       const blob = await zip.blob()
       saveBlob(blob, `${transfer.torrent.name || 'download'}.zip`)
+      showToast('Saving zip…')
     } catch (err) {
       console.error('[zip]', err)
       showToast('Could not build the zip — try saving files individually')
     } finally {
       downloadAllBtn.disabled = false
-      downloadAllBtn.textContent = originalText
+      downloadAllBtn.innerHTML = originalHtml
     }
   })
 }

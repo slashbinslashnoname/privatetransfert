@@ -44,8 +44,13 @@ export class TransferRing {
     const fraction = isSeed ? 1 : t.progress || 0
     this.progress.style.strokeDashoffset = String(CIRCUMFERENCE * (1 - fraction))
     const fullyDistributed = isSeed && t.numPeers > 0 && t.wires.every((w) => w.isSeeder)
-    this.container.classList.toggle('ring-complete', (!isSeed && t.done) || fullyDistributed)
-    this.label.textContent = isSeed ? '∞' : `${Math.round(fraction * 100)}%`
+    const complete = (!isSeed && t.done) || fullyDistributed
+    this.container.classList.toggle('ring-complete', complete)
+    if (isSeed) {
+      this.label.textContent = fullyDistributed ? '✓' : '∞'
+    } else {
+      this.label.textContent = t.done ? '✓' : `${Math.round(fraction * 100)}%`
+    }
 
     const speed = isSeed ? t.uploadSpeed : t.downloadSpeed
     const active = t.numPeers > 0 && speed > 0
