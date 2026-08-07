@@ -18,15 +18,37 @@ type Listener = () => void
 type DiagnosticListener = (message: string) => void
 
 /**
- * Public WebSocket trackers used for peer discovery. Browsers can only speak
- * to trackers over WebSocket (no UDP/raw TCP), so this list *is* the "websocket"
- * signaling layer WebRTC peers use to find each other and exchange offers/answers.
+ * WebSocket trackers used purely for peer discovery / WebRTC signaling.
+ *
+ * A browser can't speak UDP, so it has no DHT — two browsers literally cannot
+ * find each other without a WebSocket tracker acting as a rendezvous point.
+ * This is NOT a privacy hole: a tracker only ever sees a torrent's infoHash and
+ * peer IPs, never file names or contents. With "Encrypt this share" on, even a
+ * peer who joins the swarm gets only an AES-256-GCM blob — the key lives solely
+ * in the URL fragment and is never sent to any server or tracker.
+ *
+ * For a fully self-controlled ("no third party") setup, run your own tracker
+ * (e.g. `bunx bittorrent-tracker --ws --port 8000`) and point the build at it:
+ *
+ *   VITE_WS_TRACKERS="wss://tracker.example.com" bun run build
+ *
+ * Multiple comma-separated URLs are allowed; the first that answers is enough.
+ * `tracker.btorrent.xyz` was dropped from the defaults — it has been offline for
+ * a long time and was the source of the "Error connecting to wss://tracker.btorrent.xyz"
+ * failures. The remaining two are independent so one being down still connects.
  */
-export const WS_TRACKERS = [
-  'wss://tracker.openwebtorrent.com',
-  'wss://tracker.btorrent.xyz',
-  'wss://tracker.webtorrent.dev',
-]
+const DEFAULT_WS_TRACKERS = ['wss://tracker.openwebtorrent.com', 'wss://tracker.webtorrent.dev']
+
+function resolveTrackers(): string[] {
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+  const configured = (env?.VITE_WS_TRACKERS ?? '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+  return configured.length ? configured : DEFAULT_WS_TRACKERS
+}
+
+export const WS_TRACKERS = resolveTrackers()
 
 export const webrtcSupported = WebTorrent.WEBRTC_SUPPORT
 

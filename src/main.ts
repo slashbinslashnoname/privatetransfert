@@ -10,6 +10,7 @@ import { formatBytes, formatSpeed } from './format'
 import { collectFiles, normalize, pathOf } from './files'
 import { updateTitle } from './title'
 import { generateShareKey, importShareKey, exportShareKey, encryptBlob, decryptBlob, randomFileName, type ShareKey } from './crypto'
+import { streamingSaveSupported, saveStreamToDisk, SaveCancelled } from './save'
 
 const ICON_SUN = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>`
 const ICON_MOON = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z"/></svg>`
@@ -473,17 +474,28 @@ function saveBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
-async function saveTorrentFile(file: { name: string; blob(): Promise<Blob> }, btn?: HTMLButtonElement) {
+async function saveTorrentFile(
+  file: { name: string; blob(): Promise<Blob>; stream(): ReadableStream<Uint8Array> },
+  btn?: HTMLButtonElement,
+) {
   const original = btn?.innerHTML
   if (btn) {
     btn.disabled = true
     btn.innerHTML = `<span>Saving…</span>`
   }
   try {
-    const blob = await file.blob()
-    saveBlob(blob, file.name)
+    // Large files (multi-GB) can't be assembled into a single in-memory Blob —
+    // stream them straight to disk where the browser supports it. Fall back to
+    // the Blob path only when the streaming API is unavailable.
+    if (streamingSaveSupported()) {
+      await saveStreamToDisk(file.stream(), file.name)
+    } else {
+      const blob = await file.blob()
+      saveBlob(blob, file.name)
+    }
     showToast(`Saving “${file.name}”…`)
   } catch (err) {
+    if (err instanceof SaveCancelled) return
     console.error('[file]', file.name, err)
     showToast(`Couldn’t save “${file.name}”`)
   } finally {
@@ -562,12 +574,22 @@ function renderCompletedFiles(container: HTMLElement, transfer: Transfer) {
     downloadAllBtn.disabled = true
     const originalHtml = downloadAllBtn.innerHTML
     downloadAllBtn.innerHTML = `<span>Zipping…</span>`
+    const zipName = `${transfer.torrent.name || 'download'}.zip`
     try {
-      const zip = downloadZip(files.map((file) => ({ input: file.stream(), name: file.path, size: file.length })))
-      const blob = await zip.blob()
-      saveBlob(blob, `${transfer.torrent.name || 'download'}.zip`)
+      const items = files.map((file) => ({ input: file.stream(), name: file.path, size: file.length }))
+      // client-zip streams the archive as it's built. Pipe that stream straight
+      // to disk so a big folder never has to fit in memory as one Blob.
+      if (streamingSaveSupported()) {
+        const zipStream = downloadZip(items).body
+        if (!zipStream) throw new Error('zip stream unavailable')
+        await saveStreamToDisk(zipStream, zipName)
+      } else {
+        const blob = await downloadZip(items).blob()
+        saveBlob(blob, zipName)
+      }
       showToast('Saving zip…')
     } catch (err) {
+      if (err instanceof SaveCancelled) return
       console.error('[zip]', err)
       showToast('Could not build the zip — try saving files individually')
     } finally {
